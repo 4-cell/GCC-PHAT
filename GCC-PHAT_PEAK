@@ -1,0 +1,58 @@
+//shows graph with y axis as IFFT value and x axis as Max index.
+
+import processing.serial.*;
+
+Serial port;
+
+float maxIndex = 0;    // Max index from Teensy
+float ifftValue = 0;   // Corresponding IFFT value
+
+void setup() {
+  size(1000, 600);
+  println(Serial.list()); // Check which port to use
+  port = new Serial(this, Serial.list()[0], 250000);
+  port.bufferUntil('\n');
+
+  background(0);
+}
+
+void draw() {
+  // Clear previous frame
+  background(0);
+
+  // Draw axes
+  stroke(255);
+  line(50, height-50, width-20, height-50); // X-axis
+  line(50, 20, 50, height-50);              // Y-axis
+
+  // Labels
+  fill(255);
+  textSize(16);
+  text("Max Index", width/2 - 50, height - 10);
+  text("IFFT Value (0 → 1)", 10, 30);
+
+  // Draw current point only
+  float xCur = map(maxIndex, 0, 1023, 50, width-20);
+  float yCur = map(ifftValue, 0, 1, height-50, 20); // Y from 0 → 1
+  fill(255, 0, 0);
+  ellipse(xCur, yCur, 15, 15);
+
+  // Display numbers
+  fill(255);
+  textSize(24);
+  text("Max Index: " + int(maxIndex), 60, height - 60);
+  text("IFFT Value: " + nf(ifftValue, 1, 4), 60, height - 30);
+}
+
+// Serial input: send Teensy as "maxIndex,ifftValue\n"
+void serialEvent(Serial p) {
+  String line = p.readStringUntil('\n');
+  if (line != null) {
+    line = trim(line);
+    String[] parts = split(line, ',');
+    if (parts.length == 2) {
+      maxIndex = float(parts[0]);
+      ifftValue = float(parts[1]);
+    }
+  }
+}
