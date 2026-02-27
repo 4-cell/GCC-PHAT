@@ -1,12 +1,13 @@
-/*
-Added a loop that goes though all 1024 samples after IFFT, finds the largest value (maxMag),
-and records its index (maxIndex)
-Then made processing code to display this information through a graph with the y axis as the IFFT value
-and the x axis as the max index.
+/* Added a loop that goes though all 1024 samples after IFFT,
+finds the largest value (maxMag), and records its index (maxIndex)
+Then made processing code to display this information through 
+a graph with the y axis as the IFFT value and the x axis as the max index. 
 
+2/26/26
+Added code where after IFFT, the code gets the maximum peak and its index, stores 20 surrounding samples (excluding peak) for PSR. 
+If the peak is near the beginning or end of the 1024 samples, the code wraps around back to the start or end of the samples, making 
+sure that the window remains valid along the element buffer.
 */
-
-
 
 #include <Audio.h>
 #include <Wire.h>
@@ -50,9 +51,10 @@ AudioConnection pc7(dcBlocker3, 0, queue3, 0);
 // ============================================================
 static float32_t realBuf[NUM_MICS][FFT_SIZE];
 static float32_t fftOut[NUM_MICS][FFT_SIZE];
-static float32_t phase_diff_array[2][FFT_SIZE];
+static float32_t phase_diff_array[2][FFT_SIZE]; //
 static float32_t ifftOut[FFT_SIZE];
 static int       samplesCollected[NUM_MICS];
+static float32_t psr_window[2][20];
 
 // Phase difference arrays — one value per bin for each pair
 // Pair A: MIC0 vs MIC1
@@ -260,7 +262,17 @@ void setup() {
     queue3.begin();
 }
 
-// ============================================================
+int wrap_1024(int i_tmp) {
+
+     if (i_tmp<0) {
+         i_tmp=1024+i_tmp;
+     } else if (i_tmp>1023) {
+        i_tmp=i_tmp-1024;
+     }
+    return i_tmp;
+}
+
+======================================
 //  Loop
 // ============================================================
 void loop() {
@@ -321,7 +333,35 @@ void loop() {
        
         }
        
+
      }
+
+
+       psr_window[0][0] = ifftOut[wrap_1024(maxIndex-10)];
+       psr_window[0][1] = ifftOut[wrap_1024(maxIndex-9)];
+
+       psr_window[0][2] = ifftOut[maxIndex-8];
+       psr_window[0][3] = ifftOut[maxIndex-7];
+       psr_window[0][4] = ifftOut[maxIndex-6];
+       psr_window[0][5] = ifftOut[maxIndex-5];
+       psr_window[0][6] = ifftOut[maxIndex-4];
+       psr_window[0][7] = ifftOut[maxIndex-3];
+       psr_window[0][8] = ifftOut[maxIndex-2];
+       psr_window[0][9] = ifftOut[maxIndex-1];
+       psr_window[0][10] = ifftOut[maxIndex+1];
+       psr_window[0][11] = ifftOut[maxIndex+2];
+       psr_window[0][12] = ifftOut[maxIndex+3];
+       psr_window[0][13] = ifftOut[maxIndex+4];
+       psr_window[0][14] = ifftOut[maxIndex+5];
+       psr_window[0][15] = ifftOut[maxIndex+6];
+       psr_window[0][16] = ifftOut[maxIndex+7];
+       psr_window[0][17] = ifftOut[maxIndex+8];
+       psr_window[0][18] = ifftOut[maxIndex+9];
+       psr_window[0][19] = ifftOut[i_tmp];
+
+
+
+
     //Serial.print("Max value: ");
     //Serial.println(maxMag);
 
