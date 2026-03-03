@@ -9,7 +9,7 @@ If the peak is near the beginning or end of the 1024 samples, the code wraps aro
 sure that the window remains valid along the element buffer.
 
 3/2/2026
-This for loop runs 10 times and copies values from ifftOut into psr_window, grabbing 10 samples just before maxIndex and 10 samples just after it. 
+Added a for loop thst runs 10 times and copies values from ifftOut into psr_window, grabbing 10 samples just before maxIndex and 10 samples just after it. 
 The wrap_1024 function makes sure the index stays inside the valid 0–1023 range by wrapping around if it goes below 0 or above 1023.
 */
 
