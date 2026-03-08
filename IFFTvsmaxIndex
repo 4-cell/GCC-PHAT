@@ -11,6 +11,17 @@ sure that the window remains valid along the element buffer.
 3/2/2026
 Added a for loop thst runs 10 times and copies values from ifftOut into psr_window, grabbing 10 samples just before maxIndex and 10 samples just after it. 
 The wrap_1024 function makes sure the index stays inside the valid 0–1023 range by wrapping around if it goes below 0 or above 1023.
+
+3/8/2026
+Summary of system: The main code uses a Teensy with 4 microphones to locate sound in 3D by measuring tiny timing differences between mic pairs using GCC-PHAT.
+The Teensy processes audio and sends results to Processing on a PC, which visualizes it as FFT graphs, eyeball tracking, correlation curves,
+or a mosquito game. 
+
+Switching from text to binary transmission could give a 5x speed improvement since floats take 9 characters as text but only 4 bytes
+in binary. A mode-switching protocol prevents corrupted data by ensuring Teensy finishes its current frame before changing modes. 
+
+Mic spacing directly controls angular resolution, farther apart means better ability to distinguish nearby directions, 
+but too far causes obscurity.
 */
 
 #include <Audio.h>
