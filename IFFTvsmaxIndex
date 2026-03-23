@@ -22,8 +22,24 @@ in binary. A mode-switching protocol prevents corrupted data by ensuring Teensy 
 
 Mic spacing directly controls angular resolution, farther apart means better ability to distinguish nearby directions, 
 but too far causes obscurity.
+
+3/22/26
+The problem between why the processing couldn't visualize anything the teensy was giving was that  Serial.print(maxIndex, ", "); 
+was wrong because the second argument of Serial.print() must be a number format (like DEC or HEX), not a string.
+To print a comma or space after the number, I needed to use a separate Serial.print(", "); statement.
 */
 
+/*
+  Teensy 4-Mic GCC-PHAT Sound Localization Example
+  - Collects audio from 4 I2S microphones
+  - Computes FFT for each mic
+  - Computes cross-correlation (GCC-PHAT) between mic pairs
+  - Finds max correlation peak and builds a 20-sample PSR window around it
+  - Safely wraps indices around FFT_SIZE
+  - Outputs peak index and magnitude via Serial
+*/
+
+#include <Arduino.h>
 #include <Audio.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -31,7 +47,17 @@ but too far causes obscurity.
 #include <arm_math.h>
 
 // ============================================================
-//  Audio Object Graph
+// Constants
+// ============================================================
+#define FFT_SIZE     1024
+#define AUDIO_BLOCK  128
+#define SAMPLE_RATE  44100.0f
+#define NUM_MICS     4
+#define NUM_BINS     (FFT_SIZE / 2)   // 512 positive-frequency bins
+#define IFFT_SCALE   (1.0f / (FFT_SIZE / 2))
+
+// ============================================================
+// Audio Objects
 // ============================================================
 AudioInputI2SQuad    quadIn;
 
@@ -52,42 +78,26 @@ AudioConnection pc6(dcBlocker2, 0, queue2, 0);
 AudioConnection pc7(dcBlocker3, 0, queue3, 0);
 
 // ============================================================
-//  Constants
-// ============================================================
-#define FFT_SIZE     1024
-#define AUDIO_BLOCK  128
-#define SAMPLE_RATE  44100.0f
-#define NUM_MICS     4
-#define NUM_BINS     (FFT_SIZE / 2)   // 512 positive-frequency bins
-#define IFFT_SCALE   (1.0f / (FFT_SIZE / 2))
-
-// ============================================================
-//  Buffers
+// Buffers
 // ============================================================
 static float32_t realBuf[NUM_MICS][FFT_SIZE];
 static float32_t fftOut[NUM_MICS][FFT_SIZE];
-static float32_t phase_diff_array[2][FFT_SIZE]; //
+static float32_t phase_diff_array[2][FFT_SIZE];
 static float32_t ifftOut[FFT_SIZE];
 static int       samplesCollected[NUM_MICS];
 static float32_t psr_window[2][20];
 
-// Phase difference arrays — one value per bin for each pair
-// Pair A: MIC0 vs MIC1
-// Pair B: MIC2 vs MIC3
-static float32_t phaseDiffA[NUM_BINS];   // bins 0..511, MIC0 vs MIC1
-static float32_t phaseDiffB[NUM_BINS];   // bins 0..511, MIC2 vs MIC3
-
 static arm_rfft_fast_instance_f32 fftInst;
 
 // ============================================================
-//  Collect 128-sample blocks from one queue into realBuf
-//  until FFT_SIZE samples (8 blocks) are accumulated
+// Helper Functions
 // ============================================================
+
+// Collect samples from AudioRecordQueue until FFT_SIZE is reached
 void collectSamples(AudioRecordQueue &q, float32_t *buf, int &count) {
     while (q.available() && count < FFT_SIZE) {
         int16_t *blk  = q.readBuffer();
         int      take = min(AUDIO_BLOCK, FFT_SIZE - count);
-
         for (int i = 0; i < take; i++) {
             buf[count++] = (float32_t)blk[i] / 32768.0f;
         }
@@ -95,16 +105,19 @@ void collectSamples(AudioRecordQueue &q, float32_t *buf, int &count) {
     }
 }
 
-// ============================================================
-//  Forward FFT — reads realBuf[ch], writes packed complex
-//  result into fftOut[ch], returns peak bin index
-// ============================================================
-int runFFT(int ch) {
+// Wrap index around 0..FFT_SIZE-1
+int wrap_1024(int i_tmp) {
+    if (i_tmp < 0) return FFT_SIZE + i_tmp;
+    if (i_tmp >= FFT_SIZE) return i_tmp - FFT_SIZE;
+    return i_tmp;
+}
 
+// Compute FFT of a channel and return peak bin index
+int runFFT(int ch) {
     arm_rfft_fast_f32(&fftInst, realBuf[ch], fftOut[ch], 0);
 
     float32_t maxMag = 0.0f;
-    int       maxBin = 0;
+    int maxBin = 0;
 
     float32_t dcMag = fabsf(fftOut[ch][0]);
     if (dcMag > maxMag) { maxMag = dcMag; maxBin = 0; }
@@ -123,132 +136,7 @@ int runFFT(int ch) {
 }
 
 // ============================================================
-//  Inverse FFT — reads fftOut[ch], writes real time-domain
-//  samples into ifftOut[ch], applies CMSIS scaling correction
-// ============================================================
-// void runIFFT(int ch) {
-//     float32_t workBuf[FFT_SIZE];
-//     memcpy(workBuf, fftOut[ch], FFT_SIZE * sizeof(float32_t));
-//     arm_rfft_fast_f32(&fftInst, workBuf, ifftOut[ch], 1);
-//     arm_scale_f32(ifftOut[ch], IFFT_SCALE, ifftOut[ch], FFT_SIZE);
-// }
-
-// ============================================================
-//  Compute phase difference for a single bin between chA and chB
-//
-//  Step 1: cross = Z_A x Z_B* 
-//            crossRe = re_A*re_B + im_A*im_B
-//            crossIm = im_A*re_B - re_A*im_B
-//  Step 2: mag = sqrt(crossRe^2 + crossIm^2)
-//  Step 3: normalize — divide cross by mag
-//  Step 4: return atan2(normIm, normRe)
-// ============================================================
-// float32_t phaseDiffAtBin(int chA, int chB, int bin) {
-//     float32_t re_A, im_A, re_B, im_B;
-
-//     // DC bin: purely real, packed at index 0
-//     if (bin == 0) {
-//         re_A = fftOut[chA][0];  im_A = 0.0f;
-//         re_B = fftOut[chB][0];  im_B = 0.0f;
-//     }
-//     // Nyquist bin: purely real, packed at index 1
-//     else if (bin == NUM_BINS) {
-//         re_A = fftOut[chA][1];  im_A = 0.0f;
-//         re_B = fftOut[chB][1];  im_B = 0.0f;
-//     }
-//     // All other bins: complex pair at [2*bin] and [2*bin+1]
-//     else {
-//         re_A = fftOut[chA][2 * bin];
-//         im_A = fftOut[chA][2 * bin + 1];
-//         re_B = fftOut[chB][2 * bin];
-//         im_B = fftOut[chB][2 * bin + 1];
-//     }
-
-//     // Step 1
-//     float32_t crossRe = (re_A * re_B) + (im_A * im_B);
-//     float32_t crossIm = (im_A * re_B) - (re_A * im_B);
-
-//     // Step 2
-//     float32_t mag = sqrtf(crossRe * crossRe + crossIm * crossIm);
-
-//     // Step 3
-//     const float32_t epsilon = 1e-10f;
-//     float32_t normRe = crossRe / (mag + epsilon);
-//     float32_t normIm = crossIm / (mag + epsilon);
-
-//     // Step 4
-//     return atan2f(normIm, normRe);
-// }
-
-// // ============================================================
-// //  Calculate phase difference for all 512 bins for both pairs
-// //  Results stored in phaseDiffA[] (MIC0 vs MIC1)
-// //                and phaseDiffB[] (MIC2 vs MIC3)
-// // ============================================================
-// void computeAllPhaseDiffs() {
-//     for (int bin = 0; bin < NUM_BINS; bin++) {
-//         phaseDiffA[bin] = phaseDiffAtBin(0, 1, bin);
-//         phaseDiffB[bin] = phaseDiffAtBin(2, 3, bin);
-//     }
-// }
-
-// // ============================================================
-// //  Print results
-// // ============================================================
-// void reportResults(int peakBins[NUM_MICS]) {
-//     int refBin = peakBins[0];
-//     float32_t refFreqHz = (float32_t)refBin * SAMPLE_RATE / FFT_SIZE;
-
-//     // --- Per-mic peak info ---
-//     for (int ch = 0; ch < NUM_MICS; ch++) {
-//         int bin = peakBins[ch];
-//         float32_t freqHz = (float32_t)bin * SAMPLE_RATE / FFT_SIZE;
-
-//         float32_t re, im;
-//         if (bin == 0)            { re = fftOut[ch][0]; im = 0.0f; }
-//         else if (bin == NUM_BINS){ re = fftOut[ch][1]; im = 0.0f; }
-//         else { re = fftOut[ch][2*bin]; im = fftOut[ch][2*bin+1]; }
-
-//         float32_t mag   = sqrtf(re * re + im * im);
-//         float32_t phase = atan2f(im, re);
-
-//         Serial.print("MIC");      Serial.print(ch);
-//         Serial.print("  bin=");   Serial.print(bin);
-//         Serial.print("  freq=");  Serial.print(freqHz, 1); Serial.print(" Hz");
-//         Serial.print("  mag=");   Serial.print(mag,    6);
-//         Serial.print("  phase="); Serial.print(phase,  4); Serial.println(" rad");
-//     }
-
-//     // --- All 512 bin phase differences ---
-//     // Format: bin, freqHz, phaseDiffA (MIC0vsMIC1), phaseDiffB (MIC2vsMIC3)
-//     Serial.println("bin, freq(Hz), PD_MIC01(rad), PD_MIC23(rad)");
-//     for (int bin = 0; bin < NUM_BINS; bin++) {
-//         float32_t freqHz = (float32_t)bin * SAMPLE_RATE / FFT_SIZE;
-//         Serial.print(bin);
-//         Serial.print(", ");
-//         Serial.print(freqHz, 2);
-//         Serial.print(", ");
-//         Serial.print(phaseDiffA[bin], 5);
-//         Serial.print(", ");
-//         Serial.println(phaseDiffB[bin], 5);
-//     }
-
-//     // --- IFFT reconstructed signal — first 8 samples per mic ---
-//     Serial.println("IFFT reconstructed samples (first 8 per mic):");
-//     for (int ch = 0; ch < NUM_MICS; ch++) {
-//         Serial.print("  MIC"); Serial.print(ch); Serial.print(": ");
-//         for (int i = 0; i < 8; i++) {
-//             Serial.print(ifftOut[ch][i], 5);
-//             if (i < 7) Serial.print(", ");
-//         }
-//         Serial.println();
-//     }
-
-//     Serial.println("--------------------");
-// }
-
-// ============================================================
-//  Setup
+// Setup
 // ============================================================
 void setup() {
     Serial.begin(250000);
@@ -277,26 +165,18 @@ void setup() {
     queue3.begin();
 }
 
-int wrap_1024(int i_tmp) {
-
-     if (i_tmp<0) {
-         i_tmp=1024+i_tmp;
-     } else if (i_tmp>1023) {
-        i_tmp=i_tmp-1024;
-     }
-    return i_tmp;
-}
-
-======================================
-//  Loop
+// ============================================================
+// Main Loop
 // ============================================================
 void loop() {
     AudioRecordQueue *queues[NUM_MICS] = { &queue0, &queue1, &queue2, &queue3 };
 
+    // Collect samples
     for (int ch = 0; ch < NUM_MICS; ch++) {
         collectSamples(*queues[ch], realBuf[ch], samplesCollected[ch]);
     }
 
+    // Check if all channels have enough samples
     bool allReady = true;
     for (int ch = 0; ch < NUM_MICS; ch++) {
         if (samplesCollected[ch] < FFT_SIZE) { allReady = false; break; }
@@ -305,102 +185,53 @@ void loop() {
     if (allReady) {
         int peakBins[NUM_MICS];
 
-        // Forward FFT on all channels
+        // FFT on all channels
         for (int ch = 0; ch < NUM_MICS; ch++) {
             peakBins[ch] = runFFT(ch);
         }
 
-        // float32_t re  = fftOut[0][46]; // 1kHz
-        // float32_t im  = fftOut[0][47];
-        // Serial.print(", --> 46 "); Serial.print(re, 6); Serial.print(", "); Serial.print(im, 6); 
-        // re  = fftOut[0][92]; // 2Khz
-        // im  = fftOut[0][93];
-        // Serial.print(", --> 92 "); Serial.print(re, 6); Serial.print(", "); Serial.print(im, 6); Serial.println("");
+        // Compute GCC-PHAT for MIC0 vs MIC1
+        for (int k = 0; k < NUM_BINS; k++) {
+            float32_t a = fftOut[0][2 * k];
+            float32_t b = fftOut[0][2 * k + 1];
+            float32_t c = fftOut[1][2 * k];
+            float32_t d = fftOut[1][2 * k + 1];
 
+            float32_t cross_real = (a * c) + (b * d);
+            float32_t cross_imag = (b * c) - (a * d);
 
+            float32_t mag = sqrtf(cross_real * cross_real + cross_imag * cross_imag);
+            float32_t weight_denominator = mag + 1e-10f;
 
-      for (int k = 0; k < NUM_BINS; k++) {
-          float32_t a  = fftOut[0][2 * k];
-          float32_t b  = fftOut[0][2 * k + 1];
-          float32_t c  = fftOut[1][2 * k];
-          float32_t d  = fftOut[1][2 * k + 1];
-
-          float cross_real=(a*c)+(b*d);
-          float cross_imag=(b*c)-(a*d); 
-          
-
-          float32_t mag = sqrtf(cross_real*cross_real + cross_imag * cross_imag);
-          float weight_denominator= mag + 1e-10;
-          phase_diff_array[0][2*k]  =cross_real/ weight_denominator;
-          phase_diff_array[0][2*k+1]=cross_imag/ weight_denominator;
-      }
-        arm_rfft_fast_f32(&fftInst, phase_diff_array[0], ifftOut, 1);
-        float maxMag = 0.0;
-        int maxIndex = 0;
-
-     for (int i = 0; i < 1024; i++) {
-
-      float mag = ifftOut[i];
-
-        if (mag > maxMag) {
-            maxMag = mag;
-            maxIndex = i;
-       
+            phase_diff_array[0][2 * k]     = cross_real / weight_denominator;
+            phase_diff_array[0][2 * k + 1] = cross_imag / weight_denominator;
         }
-       
 
-     }
+        // IFFT of cross-correlation
+        arm_rfft_fast_f32(&fftInst, phase_diff_array[0], ifftOut, 1);
 
+        // Find max magnitude and index
+        float32_t maxMag = 0.0f;
+        int maxIndex = 0;
+        for (int i = 0; i < FFT_SIZE; i++) {
+            float32_t mag = fabsf(ifftOut[i]);
+            if (mag > maxMag) {
+                maxMag = mag;
+                maxIndex = i;
+            }
+        }
 
-       psr_window[0][0] = ifftOut[wrap_1024(maxIndex-10)];
-       psr_window[0][1] = ifftOut[wrap_1024(maxIndex-9)];
+        // Build PSR window (20 samples around maxIndex, safe wrap-around)
+        for (int j = -10; j < 10; j++) {
+            psr_window[0][j + 10] = ifftOut[wrap_1024(maxIndex + j)];
+        }
 
-       psr_window[0][2] = ifftOut[maxIndex-8];
-       psr_window[0][3] = ifftOut[maxIndex-7];
-       psr_window[0][4] = ifftOut[maxIndex-6];
-       psr_window[0][5] = ifftOut[maxIndex-5];
-       psr_window[0][6] = ifftOut[maxIndex-4];
-       psr_window[0][7] = ifftOut[maxIndex-3];
-       psr_window[0][8] = ifftOut[maxIndex-2];
-       psr_window[0][9] = ifftOut[maxIndex-1];
-       psr_window[0][10] = ifftOut[maxIndex+1];
-       psr_window[0][11] = ifftOut[maxIndex+2];
-       psr_window[0][12] = ifftOut[maxIndex+3];
-       psr_window[0][13] = ifftOut[maxIndex+4];
-       psr_window[0][14] = ifftOut[maxIndex+5];
-       psr_window[0][15] = ifftOut[maxIndex+6];
-       psr_window[0][16] = ifftOut[maxIndex+7];
-       psr_window[0][17] = ifftOut[maxIndex+8];
-       psr_window[0][18] = ifftOut[maxIndex+9];
-       psr_window[0][19] = ifftOut[i_tmp];
-
-
-
-
-    //Serial.print("Max value: ");
-    //Serial.println(maxMag);
-
-    //Serial.print("Index: ");
-    Serial.print(maxIndex);
-    Serial.print(",");
-    Serial.println(ifftOut[maxIndex]);
-        /*
-          for(int i=1014; i< 1024; i++){
-            Serial.print(ifftOut[i]); Serial.print(", ");
-          }
-          Serial.println();
-
-        */
-        // // IFFT on all channels
-        // for (int ch = 0; ch < NUM_MICS; ch++) {
-        //     runIFFT(ch);
-        // }
-
-        // // Phase difference for all 512 bins, both pairs
-        // computeAllPhaseDiffs();
-
-        // // Print everything
-        // reportResults(peakBins);
+        // Print peak info
+        //Serial.print("MaxIndex: ");
+        Serial.print(maxIndex);
+        Serial.print(",");
+        //Serial.print(", MaxMag: ");
+        Serial.println(maxMag);
 
         // Reset for next frame
         for (int ch = 0; ch < NUM_MICS; ch++) {
