@@ -42,17 +42,31 @@ void draw() {
   textSize(24);
   text("Max Index: " + int(maxIndex), 60, height - 60);
   text("IFFT Value: " + nf(ifftValue, 1, 4), 60, height - 30);
+  
+  //println(maxIndex, ifftValue);
 }
 
 // Serial input: send Teensy as "maxIndex,ifftValue\n"
+
+// if 
+// line = "MaxIndex: 892,  MaxMag: 0.09"
+// String[] parts = split(line, ',');
+// then what are the prints?
+//      println(parts[0]); MaxIndex: 892     
+//      println(parts[1]); MaxMag: 0.09
 void serialEvent(Serial p) {
   String line = p.readStringUntil('\n');
   if (line != null) {
     line = trim(line);
+    println(line);  
     String[] parts = split(line, ',');
     if (parts.length == 2) {
+
+
       maxIndex = float(parts[0]);
       ifftValue = float(parts[1]);
+      //println(maxIndex);      
+      //println(ifftValue); 
     }
   }
 }
